@@ -1,0 +1,80 @@
+# ===== 配置文件 =====
+# 所有超参数集中管理，支持通过命令行参数覆盖
+
+# ===== 数据参数 =====
+data:
+  # 分词器类型: char（中文用） / bpe（英文用）
+  tokenizer_type: "char"
+  # 词表大小上限（自动从数据构建）
+  max_vocab_size: 5000
+  # 中文预处理：繁转简 + Unicode 标准化（减少非常用字/繁体字对词表的污染）
+  chinese_normalize: true
+  # 构建词表时的最低字符频次（>=2 可过滤罕见字/脏数据，减少词表浪费）
+  min_freq: 2
+  # 序列长度：每个样本在 [min_seq_len, max_seq_len] 间随机变长
+  min_seq_len: 128 # 默认 = max_seq_len // 2，设为 None 即使用默认
+  max_seq_len: 256
+
+# ===== 模型参数 =====
+model:
+  # 词表大小
+  vocab_size: 5000
+  # 嵌入维度
+  hidden_dim: 256
+  # Transformer 层数
+  num_layers: 6
+  # 注意力头数（需能整除 hidden_dim）
+  num_heads: 8
+  # 最大序列长度（变长序列的上限，影响 RoPE/SinusoidalPE 缓存）
+  max_seq_len: 512
+  # Dropout 概率
+  dropout: 0.1
+  # FFN 中间层倍率
+  ffn_multiplier: 4
+  # 位置编码: False=Sinusoidal, True=RoPE（旋转位置编码）
+  use_rope: True
+
+# ===== 训练参数 =====
+train:
+  # 批次大小（3060 6GB 可承受 16）
+  batch_size: 16
+  # 学习率
+  learning_rate: 0.0003
+  # 权重衰减
+  weight_decay: 0.01
+  # 优化器 betas
+  beta1: 0.9
+  beta2: 0.95
+  # 学习率预热步数
+  warmup_steps: 10000
+  # 最大训练轮数
+  max_epochs: 10
+  # 日志输出间隔（步数）
+  log_interval: 200000
+  # 梯度裁剪阈值
+  grad_clip: 1.0
+  # 随机种子
+  seed: 42
+  # 数据加载器线程数
+  num_workers: 4
+
+# ===== 推理参数 =====
+infer:
+  # 生成最大新 token 数
+  max_new_tokens: 100
+  # 采样温度（1.0 = 标准，越低越确定）
+  temperature: 0.8
+  # Top-k 采样
+  top_k: 40
+  # Top-p (nucleus) 采样
+  top_p: 0.9
+  # 解码策略: greedy / temperature / topk / topp
+  strategy: "topp"
+
+# ===== 路径配置 =====
+paths:
+  data_dir: "data/tinystories_zh"
+  checkpoint_dir: "checkpoints"
+  log_dir: "logs"
+  run_dir: "runs"
+  output_dir: "output"

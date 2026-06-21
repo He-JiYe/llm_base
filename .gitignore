@@ -8,3 +8,20 @@ wheels/
 
 # Virtual environments
 .venv
+
+# runs
+runs/
+
+# logs
+logs/
+
+# checkpoints
+checkpoints/
+
+# output
+output/
+
+# datasets
+data/
+!data/download_datasets.py
+!data/prepare.py
