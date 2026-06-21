@@ -1,0 +1,12 @@
+[project]
+name = "llm"
+version = "0.1.0"
+description = "从零完整训练语言模型，面向 LLM 入门。"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.4.6",
+    "pandas>=3.0.3",
+    "pyyaml>=6.0.3",
+    "scipy>=1.17.1",
+    "torch>=2.12.0",  
+]
