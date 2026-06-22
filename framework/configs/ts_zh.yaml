@@ -50,7 +50,7 @@ train:
   # 学习率预热步数
   warmup_steps: 10000
   # 最大训练轮数
-  max_epochs: 10
+  max_epochs: 3
   # 日志输出间隔（步数）
   log_interval: 1000
   # 梯度裁剪阈值
@@ -67,7 +67,7 @@ train:
 # ===== 推理参数 =====
 infer:
   # 生成最大新 token 数
-  max_new_tokens: 100
+  max_new_tokens: 200
   # 采样温度（1.0 = 标准，越低越确定）
   temperature: 0.8
   # Top-k 采样
@@ -80,7 +80,3 @@ infer:
 # ===== 路径配置 =====
 paths:
   data_dir: "data/tinystories_zh"
-  checkpoint_dir: "checkpoints"
-  log_dir: "logs"
-  run_dir: "runs"
-  output_dir: "output"

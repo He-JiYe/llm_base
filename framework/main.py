@@ -110,14 +110,16 @@ def main():
     parser.add_argument("--output_path", type=str, default=None, help="推理结果输出路径")
 
     # 配置
-    parser.add_argument("--config_path", type=str, default="config.yaml", help="配置文件路径")
+    parser.add_argument("--config_path", type=str, default="configs/ts_zh.yaml", help="配置文件路径")
 
     args = parser.parse_args()
 
+    # ===== 从配置文件名提取 basename，用于派生默认路径 =====
+    config_stem = Path(args.config_path).stem  # e.g., configs/ts_zh1.yaml → ts_zh1
+
     # ===== 先初始化日志（早于其他操作，避免日志重复）=====
-    # 先加载路径配置来确定日志目录
     _pre_config = load_config(args.config_path)
-    log_dir = _pre_config["paths"].get("log_dir", "logs")
+    log_dir = _pre_config.get("paths", {}).get("log_dir", f"logs/{config_stem}")
     setup_logging(log_dir)
 
     # ===== 再加载完整配置 =====
@@ -130,6 +132,13 @@ def main():
         config["train"]["batch_size"] = args.batch_size
     if args.output_path is not None:
         config["infer"]["output_path"] = args.output_path
+
+    # ===== 用 config_stem 填充未指定的路径 =====
+    config.setdefault("paths", {})
+    config["paths"].setdefault("log_dir", f"logs/{config_stem}")
+    config["paths"].setdefault("run_dir", f"runs/{config_stem}")
+    config["paths"].setdefault("checkpoint_dir", f"checkpoints/{config_stem}")
+    config["paths"].setdefault("output_dir", f"output/{config_stem}")
 
     # ===== 显示配置 =====
     if args.config:
@@ -150,9 +159,9 @@ def main():
 
     # ===== 训练模式 =====
     if args.train:
-        data_dir = args.data or config["paths"].get("data_dir", "data")
-        checkpoint_dir = config["paths"].get("checkpoint_dir", "checkpoints")
-        run_dir = config["paths"].get("run_dir", "runs")
+        data_dir = args.data or config["paths"]["data_dir"]
+        checkpoint_dir = config["paths"]["checkpoint_dir"]
+        run_dir = config["paths"]["run_dir"]
 
         logger.info(f"数据目录: {data_dir}")
 
@@ -207,23 +216,17 @@ def main():
 
     # ===== 推理模式 =====
     if args.infer:
-        checkpoint_path = args.checkpoint
-        if checkpoint_path is None:
-            # 尝试默认路径
-            checkpoint_path = os.path.join(
-                config["paths"].get("checkpoint_dir", "checkpoints"), "model_best.pt"
-            )
-            if not os.path.exists(checkpoint_path):
-                logger.error("未指定检查点路径，且默认路径不存在")
-                logger.error("请使用 --checkpoint 参数指定检查点路径")
-                return
+        checkpoint_path = args.checkpoint or config["paths"]["checkpoint_dir"]
+        if not os.path.exists(checkpoint_path):
+            logger.error("未指定检查点路径，且默认路径不存在")
+            logger.error("请使用 --checkpoint 参数指定检查点路径")
+            return
 
         logger.info(f"加载检查点: {checkpoint_path}")
 
         # 加载检查点获取配置
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
         saved_config = checkpoint.get("config", config)
-        saved_config["model"]["vocab_size"] = saved_config.get("model", {}).get("vocab_size", 3500)
 
         # 创建模型
         model = create_model(saved_config)
@@ -231,27 +234,19 @@ def main():
         model = model.to(device)
         model.eval()
 
-        # 加载分词器（从数据目录或检查点目录）
-        tokenizer_paths = [
-            os.path.join(config["paths"].get("checkpoint_dir", "checkpoints"), "tokenizer.json"),
-            os.path.join(os.path.dirname(checkpoint_path), "tokenizer.json"),
-        ]
-        # 如果指定了 data 目录，优先从 data 目录加载
-        if args.data:
-            tokenizer_paths.insert(0, os.path.join(args.data, "tokenizer.json"))
+        # 加载分词器（从数据目录）
+        data_dir = args.data or config["paths"]["data_dir"]
+        tp = os.path.join(data_dir, "tokenizer.json")
 
         tokenizer = None
-        for tp in tokenizer_paths:
-            if os.path.exists(tp):
-                tokenizer = create_tokenizer_from_file(tp)
-                break
+        if os.path.exists(tp):
+            tokenizer = create_tokenizer_from_file(tp)
 
         if tokenizer is None:
             logger.error("未找到分词器文件（tokenizer.json），请确保训练时已保存")
             return
 
         # 准备 prompt
-        data_dir = args.data
         prompts = []
 
         if args.prompt:
@@ -271,9 +266,7 @@ def main():
             logger.info("使用默认 prompt")
 
         # 批量推理
-        output_path = args.output_path or os.path.join(
-            config["paths"].get("output_dir", "output"), "results.csv"
-        )
+        output_path = args.output_path or config["paths"]["output_dir"]
         results = batch_inference(
             model=model,
             tokenizer=tokenizer,

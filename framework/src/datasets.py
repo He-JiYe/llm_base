@@ -6,12 +6,10 @@
 """
 
 import logging
-import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import torch
-import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader
 
@@ -85,12 +83,32 @@ class TextDataset(Dataset):
 
 PAD_ID = 0  # 与 utils.py 中 tokenizer.pad_id 保持一致
 
+# 预定义的 bucket 边界（对齐到这些长度，减少 CUDAGraph 重录次数）
+# 值根据 max_seq_len 选择，步长 64 在降低重录次数和减少浪费 padding 间取得平衡
+_BUCKET_SIZES = [256, 384, 512]
+
+
+def _ceil_to_bucket(length: int, buckets: list = None) -> int:
+    """将长度上取整到最近的 bucket。"""
+    if buckets is None:
+        buckets = _BUCKET_SIZES
+    for b in buckets:
+        if b >= length:
+            return b
+    return buckets[-1]
+
 
 def collate_varlen_batch(
     batch: List[Dict[str, torch.Tensor]],
     pad_token_id: int = PAD_ID,
+    buckets: list = None,
 ) -> Dict[str, torch.Tensor]:
-    """将变长样本列表填充为等长 batch。
+    """将变长样本列表填充为等长 batch（带 bucket 对齐）。
+
+    先按样本实际最大长度上取整到最近的 bucket 值，
+    再将所有样本统一 pad 到此长度。
+    这样不同 batch 更容易落到相同的 bucket，大幅减少
+    torch.compile CUDAGraph 的重新录制次数。
 
     1. input_ids 尾部补 pad_token_id
     2. labels 先补 pad_token_id，再替换为 -100（让 loss 忽略）
@@ -99,22 +117,42 @@ def collate_varlen_batch(
     Args:
         batch: __getitem__ 返回的样本列表
         pad_token_id: padding token id
+        buckets: bucket 列表，默认 _BUCKET_SIZES
 
     Returns:
         {
-            "input_ids": (batch_size, max_len),
-            "labels": (batch_size, max_len)，padding 位置为 -100,
-            "attention_mask": (batch_size, max_len),
+            "input_ids": (batch_size, bucket_size),
+            "labels": (batch_size, bucket_size)，padding 位置为 -100,
+            "attention_mask": (batch_size, bucket_size),
         }
     """
     input_ids_list = [item["input_ids"] for item in batch]
     labels_list = [item["labels"] for item in batch]
 
-    # 1. pad input_ids
-    padded_input_ids = pad_sequence(input_ids_list, batch_first=True, padding_value=pad_token_id)
+    # 实际最大长度 → 对齐到 bucket
+    actual_max = max(len(x) for x in input_ids_list)
+    bucket_size = _ceil_to_bucket(actual_max, buckets)
+
+    # 1. pad input_ids 到 bucket_size
+    padded_input_ids = pad_sequence(
+        input_ids_list, batch_first=True, padding_value=pad_token_id
+    )
+    # 若不足 bucket_size，继续补全
+    if padded_input_ids.size(1) < bucket_size:
+        pad_len = bucket_size - padded_input_ids.size(1)
+        padded_input_ids = torch.nn.functional.pad(
+            padded_input_ids, (0, pad_len), value=pad_token_id
+        )
 
     # 2. pad labels，再替换为 -100
-    padded_labels = pad_sequence(labels_list, batch_first=True, padding_value=pad_token_id)
+    padded_labels = pad_sequence(
+        labels_list, batch_first=True, padding_value=pad_token_id
+    )
+    if padded_labels.size(1) < bucket_size:
+        pad_len = bucket_size - padded_labels.size(1)
+        padded_labels = torch.nn.functional.pad(
+            padded_labels, (0, pad_len), value=pad_token_id
+        )
     padded_labels[padded_labels == pad_token_id] = -100
 
     # 3. attention_mask：1 为有效 token，0 为 padding

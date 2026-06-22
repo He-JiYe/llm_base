@@ -22,12 +22,12 @@
  │   │   ├── train.py        # 训练入口
  │   │   ├── infer.py        # 推理入口
  │   │   └── utils.py        # 工具函数：评估指标
+ │   ├── configs/            # YAML 配置文件
  │   ├── checkpoints/        # 模型参数（加载点）
  │   ├── runs/               # Tensorboard 文件
  │   ├── logs/               # 训练日志
  │   ├── output/             # 测试结果
- │   ├── main.py             # CLI主入口
- │   └── config.yaml         # YAML配置文件示例
+ │   └── main.py             # CLI主入口
  ├── .gitignore              # Git 文件
  ├── .python-version         # python 3.11
  ├── .venv/                  # Python虚拟环境（已初始化）

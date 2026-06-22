@@ -207,8 +207,11 @@ def create_tokenizer_from_file(path: str) -> "BaseTokenizer":
     ttype = data.get(TOKENIZER_TYPE_KEY, "char")
     if ttype == "bpe":
         tok = BPETokenizer()
-    else:
+    elif ttype == "char":
         tok = CharTokenizer()
+    else:
+        raise ValueError(f"tokenizer type must be bpe or char but get {ttype}.")
+
     tok.load(path)
     return tok
 
