@@ -12,8 +12,8 @@ data:
   # 构建词表时的最低字符频次（>=2 可过滤罕见字/脏数据，减少词表浪费）
   min_freq: 2
   # 序列长度：每个样本在 [min_seq_len, max_seq_len] 间随机变长
-  min_seq_len: 128 # 默认 = max_seq_len // 2，设为 None 即使用默认
-  max_seq_len: 256
+  # max_seq_len 使用 model.max_seq_len，此处只配 min_seq_len
+  min_seq_len: 256 # 默认 = max_seq_len // 2，设为 None 即使用默认
 
 # ===== 模型参数 =====
 model:
@@ -33,6 +33,8 @@ model:
   ffn_multiplier: 4
   # 位置编码: False=Sinusoidal, True=RoPE（旋转位置编码）
   use_rope: True
+  # 权重绑定: embedding 和 lm_head 共享权重
+  tie_weights: True
 
 # ===== 训练参数 =====
 train:
@@ -50,13 +52,17 @@ train:
   # 最大训练轮数
   max_epochs: 10
   # 日志输出间隔（步数）
-  log_interval: 200000
+  log_interval: 1000
   # 梯度裁剪阈值
   grad_clip: 1.0
   # 随机种子
   seed: 42
   # 数据加载器线程数
   num_workers: 4
+  # 混合精度训练（FP16），可大幅降低显存、加速训练
+  use_amp: True
+  # torch.compile 编译优化（自动融合算子，需要 PyTorch 2.0+）
+  compile: True
 
 # ===== 推理参数 =====
 infer:

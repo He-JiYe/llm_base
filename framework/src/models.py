@@ -6,6 +6,7 @@
 
 import math
 import logging
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -85,21 +86,24 @@ class RotaryPositionEmbedding(nn.Module):
         self,
         q: torch.Tensor,
         k: torch.Tensor,
+        position_offset: int = 0,
     ) -> tuple:
         """对 Q 和 K 应用旋转位置编码。
 
         Args:
             q: (batch, num_heads, seq_len, head_dim)
             k: (batch, num_heads, seq_len, head_dim)
+            position_offset: 起始位置的偏移量（用于 KV cache 场景）
 
         Returns:
             (q_rotated, k_rotated)
         """
         seq_len = q.size(2)
-        self._update_cached(seq_len)
+        total_len = seq_len + position_offset
+        self._update_cached(total_len)
 
-        cos = self.cos_cached[:, :, :seq_len, :]
-        sin = self.sin_cached[:, :, :seq_len, :]
+        cos = self.cos_cached[:, :, position_offset:position_offset + seq_len, :]
+        sin = self.sin_cached[:, :, position_offset:position_offset + seq_len, :]
 
         q_embed = (q * cos) + (self._rotate_half(q) * sin)
         k_embed = (k * cos) + (self._rotate_half(k) * sin)
@@ -159,15 +163,23 @@ class MultiHeadCausalAttention(nn.Module):
             persistent=False,
         )
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_mask: torch.Tensor = None,
+        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        use_cache: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         """前向传播。
 
         Args:
             x: 输入张量 (batch_size, seq_len, hidden_dim)
             attention_mask: 注意力掩码 (batch_size, seq_len)
+            past_key_value: 缓存的 (key, value)，来自前一步生成
+            use_cache: 是否返回当前步的 KV cache
 
         Returns:
-            注意力输出 (batch_size, seq_len, hidden_dim)
+            (注意力输出, KV cache 或 None)
         """
         batch_size, seq_len, _ = x.shape
 
@@ -176,19 +188,37 @@ class MultiHeadCausalAttention(nn.Module):
         k = self.k_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # RoPE 旋转位置编码（作用于 Q 和 K）
+        # KV cache：确定当前 token 的起始位置偏移
+        if past_key_value is not None:
+            past_k, past_v = past_key_value
+            past_len = past_k.size(2)
+        else:
+            past_len = 0
+
+        # RoPE 旋转位置编码（在 concat 之前对新 token 单独旋转）
         if self.use_rope:
-            q, k = self.rope(q, k)
+            q, k = self.rope(q, k, position_offset=past_len)
+
+        # 拼接历史 KV
+        if past_key_value is not None:
+            k = torch.cat([past_k, k], dim=2)
+            v = torch.cat([past_v, v], dim=2)
+
+        # 准备返回 cache（拼接后的完整 K、V）
+        present_key_value = (k, v) if use_cache else None
 
         # 注意力分数
+        kv_len = k.size(2)
+        q_len = q.size(2)
         attn_scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
 
-        # causal mask
-        causal_mask = self.causal_mask[:, :, :seq_len, :seq_len]
+        # causal mask（从预计算矩阵中按偏移量切片）
+        causal_mask = self.causal_mask[:, :, past_len:past_len + q_len, :kv_len]
         attn_scores = attn_scores + causal_mask
 
         # padding mask
         if attention_mask is not None:
+            # 扩展为 (batch, 1, 1, kv_len) 以广播到注意力分数
             attn_mask_expanded = attention_mask.unsqueeze(1).unsqueeze(2)
             attn_scores = attn_scores.masked_fill(attn_mask_expanded == 0, float("-inf"))
 
@@ -202,7 +232,7 @@ class MultiHeadCausalAttention(nn.Module):
 
         # 输出投影
         output = self.out_proj(attn_output)
-        return output
+        return output, present_key_value
 
 
 # ===== 前馈神经网络 =====
@@ -286,20 +316,28 @@ class TransformerBlock(nn.Module):
         self.ln2 = nn.LayerNorm(hidden_dim)
         self.ffn = FeedForward(hidden_dim, ffn_multiplier, dropout)
 
-    def forward(self, x: torch.Tensor, attention_mask: torch.Tensor = None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_mask: torch.Tensor = None,
+        past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        use_cache: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor, torch.Tensor]]]:
         """前向传播。
 
         Args:
             x: 输入张量 (batch_size, seq_len, hidden_dim)
             attention_mask: 注意力掩码 (batch_size, seq_len)
+            past_key_value: 本层缓存的 (key, value)
+            use_cache: 是否返回本层 KV cache
 
         Returns:
-            输出张量 (batch_size, seq_len, hidden_dim)
+            (输出张量, 本层 KV cache 或 None)
         """
         # Pre-LayerNorm 残差连接
         residual = x
         x = self.ln1(x)
-        x = self.attention(x, attention_mask)
+        x, present_key_value = self.attention(x, attention_mask, past_key_value, use_cache)
         x = residual + x
 
         # FFN 子层
@@ -308,7 +346,7 @@ class TransformerBlock(nn.Module):
         x = self.ffn(x)
         x = residual + x
 
-        return x
+        return x, present_key_value
 
 
 # ===== 主体 Transformer 模型 =====
@@ -404,6 +442,8 @@ class DecoderOnlyTransformer(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor = None,
         labels: torch.Tensor = None,
+        past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        use_cache: bool = False,
     ) -> dict:
         """前向传播。
 
@@ -411,14 +451,15 @@ class DecoderOnlyTransformer(nn.Module):
             input_ids: 输入 token id (batch_size, seq_len)
             attention_mask: 注意力掩码 (batch_size, seq_len)
             labels: 目标标签 (batch_size, seq_len)，用于计算损失
+            past_key_values: 各层缓存的 (key, value) 列表，每层一个
+            use_cache: 是否返回各层的 KV cache
 
         Returns:
             dict 包含:
                 - logits: 输出 logits (batch_size, seq_len, vocab_size)
                 - loss: 交叉熵损失（若 labels 不为 None）
+                - past_key_values: 各层 KV cache 列表（若 use_cache=True）
         """
-        batch_size, seq_len = input_ids.shape
-
         # Token 嵌入
         x = self.token_embedding(input_ids)
         # 位置编码：Sinusoidal 直接加在输入，RoPE 在注意力中处理
@@ -426,9 +467,13 @@ class DecoderOnlyTransformer(nn.Module):
             x = self.position_embedding(x)
         x = self.dropout(x)
 
-        # 通过 Transformer 层
-        for layer in self.layers:
-            x = layer(x, attention_mask)
+        # 通过 Transformer 层（携带 KV cache）
+        present_key_values = [] if use_cache else None
+        for i, layer in enumerate(self.layers):
+            past_kv = past_key_values[i] if past_key_values is not None else None
+            x, present_kv = layer(x, attention_mask, past_kv, use_cache)
+            if use_cache:
+                present_key_values.append(present_kv)
 
         # 最终 LayerNorm 和输出投影
         x = self.ln_f(x)
@@ -446,7 +491,7 @@ class DecoderOnlyTransformer(nn.Module):
                 ignore_index=-100,  # 忽略 padding 位置
             )
 
-        return {"logits": logits, "loss": loss}
+        return {"logits": logits, "loss": loss, "past_key_values": present_key_values}
 
     @torch.no_grad()
     def generate(
@@ -458,10 +503,11 @@ class DecoderOnlyTransformer(nn.Module):
         top_p: float = None,
         eos_token_id: int = None,
         pad_token_id: int = 0,
+        use_cache: bool = True,
     ) -> torch.Tensor:
-        """自回归文本生成。
+        """自回归文本生成（支持 KV cache）。
 
-        支持多种解码策略：贪心、温度采样、Top-k、Top-p (nucleus)。
+        使用可选的 KV cache 逐 token 生成，避免重复计算历史位置的注意力。
 
         Args:
             input_ids: 初始 token id 序列 (batch_size, seq_len)
@@ -471,30 +517,45 @@ class DecoderOnlyTransformer(nn.Module):
             top_p: Top-p 采样的 p 值
             eos_token_id: 结束 token id，生成到此 id 停止
             pad_token_id: padding token id
+            use_cache: 是否启用 KV cache（加速生成）
 
         Returns:
             生成的 token id 序列 (batch_size, total_len)
         """
-        batch_size = input_ids.shape[0]
-        device = input_ids.device
         generated = input_ids.clone()
+        past_key_values = None
 
         for _ in range(max_new_tokens):
-            # 截断到 max_seq_len
+            # 超长时截断并重置 cache（避免逐步放大）
             if generated.size(1) > self.max_seq_len:
                 generated = generated[:, -self.max_seq_len:]
+                past_key_values = None  # 重新从截断后的上下文计算 cache
 
-            # 前向传播获取 logits
-            attention_mask = (generated != pad_token_id).long()
-            outputs = self.forward(generated, attention_mask=attention_mask)
-            logits = outputs["logits"]
+            if past_key_values is None:
+                # 首步：全量计算，获取 KV cache
+                attention_mask = (generated != pad_token_id).long()  
+                outputs = self.forward(
+                    generated,
+                    attention_mask=attention_mask,
+                    use_cache=use_cache,
+                )
+                past_key_values = outputs["past_key_values"] if use_cache else None
+            else:
+                # 后续步：只处理最新的一个 token，复用 cache
+                last_token = generated[:, -1:]
+                outputs = self.forward(
+                    last_token,
+                    past_key_values=past_key_values,
+                    use_cache=use_cache,
+                )
+                past_key_values = outputs["past_key_values"] if use_cache else None
 
             # 取最后一个位置的 logits
+            logits = outputs["logits"]
             next_logits = logits[:, -1, :] / temperature
 
             # Top-k 过滤
             if top_k is not None and top_k > 0:
-                # 保留 top_k 个最高概率的 token，其余设为 -inf
                 top_k_values, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
                 threshold = top_k_values[:, -1].unsqueeze(-1)
                 next_logits = next_logits.masked_fill(next_logits < threshold, float("-inf"))
@@ -503,13 +564,9 @@ class DecoderOnlyTransformer(nn.Module):
             if top_p is not None and top_p < 1.0:
                 sorted_logits, sorted_indices = torch.sort(next_logits, descending=True, dim=-1)
                 cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-
-                # 移除累计概率超过 top_p 的 token
                 sorted_indices_to_remove = cumulative_probs > top_p
-                # 偏移一位，至少保留第一个 token
                 sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
                 sorted_indices_to_remove[:, 0] = False
-
                 indices_to_remove = sorted_indices_to_remove.scatter(
                     1, sorted_indices, sorted_indices_to_remove
                 )
@@ -549,7 +606,7 @@ def create_model(config: dict) -> DecoderOnlyTransformer:
         max_seq_len=model_config.get("max_seq_len", 256),
         dropout=model_config.get("dropout", 0.1),
         ffn_multiplier=model_config.get("ffn_multiplier", 4),
-        tie_weights=True,
+        tie_weights=model_config.get("tie_weights", True),
         use_rope=model_config.get("use_rope", False),
     )
     return model

@@ -122,6 +122,19 @@ class Trainer:
         self.save_interval = train_config.get("save_interval", 1000)
         self.grad_clip = train_config.get("grad_clip", 1.0)
 
+        # ===== 性能优化选项 =====
+        # 混合精度训练 (AMP)
+        self.use_amp = train_config.get("use_amp", False) and device.type == "cuda"
+        self.scaler = torch.amp.GradScaler(enabled=self.use_amp)
+        # 编译优化 (torch.compile)
+        use_compile = train_config.get("compile", False) and device.type == "cuda"
+        if use_compile:
+            try:
+                self.model = torch.compile(self.model, mode="reduce-overhead")
+                logger.info("模型已启用 torch.compile（reduce-overhead 模式）")
+            except Exception as e:
+                logger.warning(f"torch.compile 启用失败，回退到 eager 模式: {e}")
+
         # 计算总训练步数
         self.steps_per_epoch = len(train_loader)
         self.total_steps = self.steps_per_epoch * self.max_epochs
@@ -185,19 +198,22 @@ class Trainer:
             if attention_mask is not None:
                 attention_mask = attention_mask.to(self.device)
 
-            # 前向传播
-            outputs = self.model(input_ids, labels=labels, attention_mask=attention_mask)
-            loss = outputs["loss"]
+            # 前向传播（混合精度）
+            with torch.amp.autocast(device_type=self.device.type, enabled=self.use_amp):
+                outputs = self.model(input_ids, labels=labels, attention_mask=attention_mask)
+                loss = outputs["loss"]
 
-            # 反向传播
+            # 反向传播（梯度缩放）
             self.optimizer.zero_grad()
-            loss.backward()
+            self.scaler.scale(loss).backward()
 
-            # 梯度裁剪
+            # 梯度裁剪（需先 unscale）
             if self.grad_clip > 0:
+                self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
 
-            self.optimizer.step()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
             self.scheduler.step()
 
             # 统计
@@ -252,7 +268,8 @@ class Trainer:
             if attention_mask is not None:
                 attention_mask = attention_mask.to(self.device)
 
-            outputs = self.model(input_ids, labels=labels, attention_mask=attention_mask)
+            with torch.amp.autocast(device_type=self.device.type, enabled=self.use_amp):
+                outputs = self.model(input_ids, labels=labels, attention_mask=attention_mask)
             loss = outputs["loss"]
 
             total_loss += loss.item()
@@ -326,6 +343,7 @@ class Trainer:
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
+            "scaler_state_dict": self.scaler.state_dict() if self.use_amp else None,
             "config": self.config,
             "epoch": self.current_epoch,
             "global_step": self.global_step,
@@ -362,6 +380,10 @@ class Trainer:
             self.best_valid_loss = checkpoint.get("best_valid_loss", float("inf"))
             self.train_losses = checkpoint.get("train_losses", [])
             self.valid_losses = checkpoint.get("valid_losses", [])
+
+            # 恢复 AMP scaler 状态
+            if self.use_amp and checkpoint.get("scaler_state_dict") is not None:
+                self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
 
             logger.info(
                 f"检查点已加载: {checkpoint_path} | "
