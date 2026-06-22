@@ -39,7 +39,7 @@ model:
 # ===== 训练参数 =====
 train:
   # 批次大小（3060 6GB 可承受 16）
-  batch_size: 16
+  batch_size: 32
   # 学习率
   learning_rate: 0.0003
   # 权重衰减

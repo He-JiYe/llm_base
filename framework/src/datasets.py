@@ -202,7 +202,7 @@ def load_texts_from_directory(data_dir: str) -> List[str]:
 
 # 数据集中的特殊标记（如故事分隔符），在 tokenization 之前剥离
 # 避免模型学习无语义的标记，也避免污染词表
-_DATA_SPECIAL_TOKENS = ["<|endoftext|>", "<|im_start|>", "<|im_sep|>"]
+_DATA_SPECIAL_TOKENS = ["<|endoftext|>"]
 
 # 构建词表时的文本块大小（字符数），避免一次载入全部文本
 _VOCAB_CHUNK_SIZE = 500_000
@@ -211,7 +211,7 @@ _VOCAB_CHUNK_SIZE = 500_000
 def _clean_special_tokens(text: str) -> str:
     """移除数据集中的特殊标记，防止污染词表和模型输出。"""
     for t in _DATA_SPECIAL_TOKENS:
-        text = text.replace(t, "")
+        text = text.replace(t, "\n")
     return text.strip()
 
 
@@ -324,21 +324,27 @@ def create_dataloaders(
         train_text, tokenizer, data_dir, is_train=True,
         max_vocab_size=max_vocab_size, min_freq=min_freq,
     )
+    del train_text  # 原始文本不再需要，及时释放
     logger.info(f"训练集 token 数: {len(train_ids):,}")
 
     # 验证集：复用训练集词表
     valid_text = load_single_file(str(valid_file))
     valid_ids = _tokenize_text(valid_text, tokenizer, data_dir, is_train=False)
+    del valid_text
     logger.info(f"验证集 token 数: {len(valid_ids):,}")
 
     # 测试集
     test_text = load_single_file(str(test_file))
     test_ids = _tokenize_text(test_text, tokenizer, data_dir, is_train=False)
+    del test_text
     logger.info(f"测试集 token 数: {len(test_ids):,}")
 
     train_dataset = TextDataset(train_ids, max_seq_len=max_seq_len, min_seq_len=min_seq_len)
     valid_dataset = TextDataset(valid_ids, max_seq_len=max_seq_len, min_seq_len=min_seq_len)
     test_dataset = TextDataset(test_ids, max_seq_len=max_seq_len, min_seq_len=min_seq_len)
+
+    # token_ids 列表已传给 TextDataset（内部转成了 tensor），可安全释放
+    del train_ids, valid_ids, test_ids
 
     # ===== 创建 DataLoader（使用自定义 collate_fn） =====
     dataloader_kwargs = dict(

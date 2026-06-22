@@ -255,7 +255,7 @@ def main():
             from src.datasets import load_texts_from_directory
             test_texts = load_texts_from_directory(data_dir)
             # 取每个文本的前 20 个字符作为 prompt
-            prompts = [text[:min(20, len(text))] for text in test_texts]
+            prompts = [text[:min(20, len(text))] for text in test_texts[:50]]
             logger.info(f"从 {data_dir} 加载了 {len(prompts)} 个测试 prompt")
         else:
             # 使用默认 prompt

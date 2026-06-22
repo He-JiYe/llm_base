@@ -302,13 +302,23 @@ class CharTokenizer(BaseTokenizer):
 _PRETOKENIZE_PAT = re.compile(r"[A-Za-z0-9']+|[^\sA-Za-z0-9']+|\s+")
 
 
-def _pretokenize(text: str) -> List[str]:
-    """预分词：按 GPT-2 风格拆分为单词/符号片段。"""
-    return _PRETOKENIZE_PAT.findall(text)
+def _pretokenize(text: str):
+    """预分词：按 GPT-2 风格拆分为单词/符号片段（生成器）。
+
+    使用 `finditer` 而非 `findall`，避免为巨量文本创建全量词列表。
+    调用方通过 `for word in _pretokenize(text)` 逐词消费。
+    """
+    return (m.group() for m in _PRETOKENIZE_PAT.finditer(text))
 
 
 def _merge_pair(word: str, pair: Tuple[str, str], new_token: str) -> str:
-    """将 word 中所有相邻的 pair 替换为 new_token。"""
+    """将 word 中所有相邻的 pair 替换为 new_token。
+
+    纯空白词（如空格）不会被合并，保持原样返回。
+    """
+    if not word.strip():
+        # 纯空白词：split() 会返回 []，导致信息丢失
+        return word
     first, second = pair
     result = []
     symbols = word.split()
@@ -336,6 +346,8 @@ class BPETokenizer(BaseTokenizer):
         super().__init__()
         # BPE 合并规则列表：[(token_a, token_b), ...]
         self.merges: List[Tuple[str, str]] = []
+        # 单词→token_ids 缓存（避免对重复单词反复运行 merge 规则）
+        self._encode_cache: Dict[str, List[int]] = {}
 
     def build_vocab(
         self,
@@ -429,6 +441,23 @@ class BPETokenizer(BaseTokenizer):
             f"合并规则数: {len(self.merges)}"
         )
 
+        # 将训练好的 word→symbols 转为 word→token_ids 缓存
+        # 此后 encode 只是查表，不再执行 merge 规则
+        for word, symbols_str in tqdm(
+            word_to_symbols.items(), desc="预编码词表", unit="词"
+        ):
+            # symbols 用空格分隔，但纯空白词（如" "）split()后为空列表
+            # 此时直接取每个字符的 ID：
+            if not symbols_str.strip():
+                word_ids = [self.vocab[ch] for ch in symbols_str]
+            else:
+                word_ids = [self.vocab[sym] for sym in symbols_str.split()]
+            self._encode_cache[word] = word_ids
+        logger.info(f"词表预编码完成 | 缓存词数: {len(self._encode_cache)}")
+
+        # 释放 BPE 训练时的临时大结构
+        del word_counts, word_to_symbols
+
     def encode(self, text: str, add_special: bool = True) -> List[int]:
         """使用 BPE 规则将文本编码为 token id 序列。
 
@@ -445,39 +474,32 @@ class BPETokenizer(BaseTokenizer):
             ids.append(self.bos_id)
 
         for word in words:
-            # 将单词拆分为字符
-            symbols = list(word)
-            # 贪心应用合并规则
-            merged = True
-            while merged:
-                merged = False
-                # 尝试按顺序应用每个合并规则
-                for pair in self.merges:
-                    pair_str = f"{pair[0]} {pair[1]}"
-                    new_str = pair[0] + pair[1]
-                    # 将 symbols 拼成字符串检查
-                    symbol_str = " ".join(symbols)
-                    if pair_str in symbol_str:
-                        # 找到第一个匹配位置
-                        idx = symbol_str.find(pair_str)
-                        # 重新构建 symbols
-                        new_symbols = []
-                        i = 0
-                        syms = symbol_str.split()
-                        while i < len(syms):
-                            if i < len(syms) - 1 and syms[i] == pair[0] and syms[i + 1] == pair[1]:
-                                new_symbols.append(new_str)
-                                i += 2
-                                merged = True
-                            else:
-                                new_symbols.append(syms[i])
-                                i += 1
-                        symbols = new_symbols
-                        break  # 每次只应用一个规则
+            # 优先从缓存读取（英文语料重复词极高，可节省 90%+ 的计算）
+            cached = self._encode_cache.get(word)
+            if cached is not None:
+                ids.extend(cached)
+                continue
 
-            # 将单词的 token id 加入结果
-            for sym in symbols:
-                ids.append(self.vocab.get(sym, self.unk_id))
+            # 从字符级表示开始，按顺序应用所有合并规则
+            symbols = list(word)
+            for pair in self.merges:
+                first, second = pair
+                merged = first + second
+                new_syms = []
+                i = 0
+                while i < len(symbols):
+                    if i < len(symbols) - 1 and symbols[i] == first and symbols[i + 1] == second:
+                        new_syms.append(merged)
+                        i += 2
+                    else:
+                        new_syms.append(symbols[i])
+                        i += 1
+                symbols = new_syms
+
+            # 缓存并加入结果
+            word_ids = [self.vocab.get(sym, self.unk_id) for sym in symbols]
+            self._encode_cache[word] = word_ids
+            ids.extend(word_ids)
 
         if add_special:
             ids.append(self.eos_id)
@@ -505,10 +527,18 @@ class BPETokenizer(BaseTokenizer):
         return text.strip()
 
     def _extra_save_data(self) -> dict:
-        return {"merges": self.merges}
+        return {
+            "merges": self.merges,
+            "encode_cache": dict(self._encode_cache),
+        }
 
     def _extra_load_data(self, data: dict):
         self.merges = [tuple(m) for m in data.get("merges", [])]
+        # 恢复预编码缓存（旧文件可能没有）
+        raw_cache = data.get("encode_cache", {})
+        self._encode_cache = {
+            k: [int(v) for v in vals] for k, vals in raw_cache.items()
+        }
 
 
 # ===== 分词器工厂 =====
