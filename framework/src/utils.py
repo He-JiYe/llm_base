@@ -19,47 +19,57 @@ logger = logging.getLogger(__name__)
 _logging_configured = False
 
 
-def setup_logging(log_dir: str = "logs", log_level: int = logging.INFO):
-    """统一配置日志系统：同时输出到文件和终端。
+def setup_logging(
+    log_file: str = None,
+    log_level: int = logging.INFO,
+):
+    """统一配置日志系统。
 
-    幂等设计，只初始化一次。所有模块共用同一套配置。
+    控制台只初始化一次（幂等）。首次调用可传入 `log_file` 同时添加文件输出。
+    后续调用可追加新的日志文件，同一文件不会重复添加。
 
     Args:
-        log_dir: 日志文件目录
+        log_file: 日志文件路径（如 "logs/training.log"），为 None 时不写文件
         log_level: 日志级别
     """
-    global _logging_configured
-    if _logging_configured:
-        return
-    _logging_configured = True
-
     import os as _os
     import sys as _sys
-
-    _os.makedirs(log_dir, exist_ok=True)
 
     root = logging.getLogger()
     root.setLevel(log_level)
 
-    # 清除根 logger 已有 handler（某些库在 import 时可能添加了默认 handler）
-    for h in root.handlers[:]:
-        root.removeHandler(h)
+    # === 控制台 handler（只初始化一次） ===
+    global _logging_configured
+    if not _logging_configured:
+        _logging_configured = True
 
-    formatter = logging.Formatter("[%(asctime)s] %(levelname)s - %(message)s")
+        for h in root.handlers[:]:
+            if isinstance(h, logging.StreamHandler):
+                root.removeHandler(h)
 
-    # 文件处理器
-    file_handler = logging.FileHandler(
-        _os.path.join(log_dir, "training.log"), encoding="utf-8"
-    )
-    file_handler.setFormatter(formatter)
-    root.addHandler(file_handler)
+        formatter = logging.Formatter("[%(asctime)s] %(levelname)s - %(message)s")
+        console_handler = logging.StreamHandler(_sys.stdout)
+        console_handler.setFormatter(formatter)
+        root.addHandler(console_handler)
 
-    # 控制台处理器
-    console_handler = logging.StreamHandler(_sys.stdout)
-    console_handler.setFormatter(formatter)
-    root.addHandler(console_handler)
+        logger.info(f"日志系统已初始化 | 级别: {logging.getLevelName(log_level)}")
 
-    logger.info(f"日志系统已初始化 | 级别: {logging.getLevelName(log_level)} | 文件: {log_dir}/training.log")
+    # === 文件 handler（每次调用按需添加） ===
+    if log_file is not None:
+        _os.makedirs(_os.path.dirname(log_file) or ".", exist_ok=True)
+
+        already_exists = any(
+            isinstance(h, logging.FileHandler)
+            and _os.path.abspath(h.baseFilename) == _os.path.abspath(log_file)
+            for h in root.handlers
+        )
+        if not already_exists:
+            formatter = logging.Formatter("[%(asctime)s] %(levelname)s - %(message)s")
+            file_handler = logging.FileHandler(log_file, encoding="utf-8")
+            file_handler.setFormatter(formatter)
+            file_handler.setLevel(log_level)
+            root.addHandler(file_handler)
+            logger.info(f"日志文件已添加: {log_file}")
 
 
 # ===== 中文文本预处理 =====
@@ -577,3 +587,21 @@ def seed_everything(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     logger.info(f"随机种子已设置: {seed}")
+
+
+def strip_compile_prefix(state_dict: dict) -> dict:
+    """移除 torch.compile 产生的 `_orig_mod.` 前缀，兼容非 compile 模式加载。
+
+    torch.compile 会将原始模型包装，保存的 state_dict key 带 `_orig_mod.` 前缀。
+    当在没有 `torch.compile` 的环境中加载时，这些前缀会导致 key 不匹配。
+
+    Args:
+        state_dict: 可能带有 `_orig_mod.` 前缀的 state_dict
+
+    Returns:
+        移除前缀后的 state_dict
+    """
+    if any(k.startswith("_orig_mod.") for k in state_dict):
+        logger.info("检测到 torch.compile 前缀 _orig_mod.，正在剥离...")
+        return {k.removeprefix("_orig_mod."): v for k, v in state_dict.items()}
+    return state_dict

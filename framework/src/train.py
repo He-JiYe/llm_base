@@ -23,7 +23,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from tqdm import tqdm
 
-from src.utils import compute_perplexity, count_parameters
+from src.utils import compute_perplexity, count_parameters, strip_compile_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,6 @@ class Trainer:
         config: dict,
         device: torch.device,
         run_dir: str = "runs",
-        log_dir: str = "logs",
         checkpoint_dir: str = "checkpoints",
     ):
         """初始化训练器。
@@ -95,7 +94,6 @@ class Trainer:
             config: 训练配置字典
             device: 计算设备
             run_dir: TensorBoard 日志目录
-            log_dir: 训练日志目录
             checkpoint_dir: 检查点保存目录
         """
         self.model = model
@@ -106,7 +104,6 @@ class Trainer:
 
         # 路径
         self.run_dir = Path(run_dir)
-        self.log_dir = Path(log_dir)
         self.checkpoint_dir = Path(checkpoint_dir)
 
         # 训练配置
@@ -358,7 +355,7 @@ class Trainer:
         """加载检查点恢复训练。
 
         Args:
-            checkpoint_path: 检查点文件路径
+            checkpoint_path: 检查点文件路径（仅用于日志和存在性检查）
 
         Returns:
             是否成功加载
@@ -369,9 +366,12 @@ class Trainer:
             return False
 
         try:
-            checkpoint = torch.load(path, map_location=self.device)
+            checkpoint = torch.load(
+                path, map_location=self.device, weights_only=False
+            )
 
-            self.model.load_state_dict(checkpoint["model_state_dict"])
+            state_dict = strip_compile_prefix(checkpoint["model_state_dict"])
+            self.model.load_state_dict(state_dict)
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 

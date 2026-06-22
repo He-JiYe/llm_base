@@ -76,6 +76,10 @@ class TextDataset(Dataset):
         length = int(torch.randint(self.min_seq_len, self.max_seq_len + 1, (1,), generator=rng).item())
 
         segment = self.token_ids[start:start + length]
+        # 尾部不足时回退取最后一段
+        if len(segment) < self.min_seq_len:
+            start = max(0, len(self.token_ids) - length)
+            segment = self.token_ids[start:start + length]
         return {"input_ids": segment, "labels": segment.clone()}
 
 
@@ -175,10 +179,40 @@ def load_single_file(filepath: str) -> str:
     logger.info(f"从 {filepath} 加载文本 ({len(text):,} 字符)")
     return text
 
+
+def load_texts_from_directory(data_dir: str) -> List[str]:
+    """从数据目录加载测试文本（每行为一个样本）。
+
+    Args:
+        data_dir: 数据目录路径
+
+    Returns:
+        文本列表
+    """
+    test_file = Path(data_dir) / "test.txt"
+    if not test_file.exists():
+        logger.warning(f"测试文件不存在: {test_file}")
+        return []
+    text = test_file.read_text(encoding="utf-8").strip()
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    logger.info(f"从 {test_file} 加载了 {len(lines)} 条测试文本")
+    return lines
+
 # ===== 加载文本并构建/复用词表 =====
+
+# 数据集中的特殊标记（如故事分隔符），在 tokenization 之前剥离
+# 避免模型学习无语义的标记，也避免污染词表
+_DATA_SPECIAL_TOKENS = ["<|endoftext|>", "<|im_start|>", "<|im_sep|>"]
 
 # 构建词表时的文本块大小（字符数），避免一次载入全部文本
 _VOCAB_CHUNK_SIZE = 500_000
+
+
+def _clean_special_tokens(text: str) -> str:
+    """移除数据集中的特殊标记，防止污染词表和模型输出。"""
+    for t in _DATA_SPECIAL_TOKENS:
+        text = text.replace(t, "")
+    return text.strip()
 
 
 def _text_chunker(text: str, chunk_size: int = _VOCAB_CHUNK_SIZE):
@@ -216,6 +250,9 @@ def _tokenize_text(
     Returns:
         token id 列表
     """
+    # 清洗数据集特殊标记，避免污染词表和模型输出
+    text = _clean_special_tokens(text)
+
     # 先加载已有词表
     if tokenizer.vocab_size == 0:
         path = Path(data_dir) / TOKENIZER_FILENAME
@@ -311,10 +348,14 @@ def create_dataloaders(
         collate_fn=collate_varlen_batch,
     )
 
+    # 固定种子保证 DataLoader shuffle 可复现
+    _generator = torch.Generator().manual_seed(seed)
+
     train_loader = DataLoader(
         train_dataset,
         shuffle=True,
         drop_last=True,
+        generator=_generator,
         **dataloader_kwargs,
     )
     valid_loader = DataLoader(

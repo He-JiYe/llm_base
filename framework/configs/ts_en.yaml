@@ -6,7 +6,7 @@ data:
   # 分词器类型: char（中文用） / bpe（英文用）
   tokenizer_type: "bpe"
   # 词表大小上限（自动从数据构建）
-  max_vocab_size: 5000
+  max_vocab_size: 2500
   # 中文预处理：繁转简 + Unicode 标准化（减少非常用字/繁体字对词表的污染）
   chinese_normalize: true
   # 构建词表时的最低字符频次（>=2 可过滤罕见字/脏数据，减少词表浪费）
@@ -18,7 +18,7 @@ data:
 # ===== 模型参数 =====
 model:
   # 词表大小
-  vocab_size: 5000
+  vocab_size: 2500
   # 嵌入维度
   hidden_dim: 256
   # Transformer 层数

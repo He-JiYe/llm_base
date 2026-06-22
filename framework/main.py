@@ -41,6 +41,7 @@ from src.utils import (
     create_tokenizer_from_file,
     seed_everything,
     setup_logging,
+    strip_compile_prefix,
 )
 
 
@@ -113,14 +114,7 @@ def main():
     parser.add_argument("--config_path", type=str, default="configs/ts_zh.yaml", help="配置文件路径")
 
     args = parser.parse_args()
-
-    # ===== 从配置文件名提取 basename，用于派生默认路径 =====
-    config_stem = Path(args.config_path).stem  # e.g., configs/ts_zh1.yaml → ts_zh1
-
-    # ===== 先初始化日志（早于其他操作，避免日志重复）=====
-    _pre_config = load_config(args.config_path)
-    log_dir = _pre_config.get("paths", {}).get("log_dir", f"logs/{config_stem}")
-    setup_logging(log_dir)
+    config_stem = Path(args.config_path).stem  # e.g., configs/ts_zh.yaml → ts_zh
 
     # ===== 再加载完整配置 =====
     config = load_config(args.config_path)
@@ -149,6 +143,10 @@ def main():
     seed = config["train"].get("seed", 42)
     seed_everything(seed)
 
+    log_dir = config["paths"]["log_dir"]
+    log_file = os.path.join(log_dir, "training.log" if args.train else ("infer.log" if args.infer else None))
+    setup_logging(log_file=log_file)
+
     logger = logging.getLogger(__name__)
     logger.info("=" * 50)
     logger.info("Mini LLM - 从零训练语言模型")
@@ -161,7 +159,6 @@ def main():
     if args.train:
         data_dir = args.data or config["paths"]["data_dir"]
         checkpoint_dir = config["paths"]["checkpoint_dir"]
-        run_dir = config["paths"]["run_dir"]
 
         logger.info(f"数据目录: {data_dir}")
 
@@ -198,12 +195,11 @@ def main():
             valid_loader=dataloaders["valid"],
             config=config,
             device=device,
-            run_dir=run_dir,
-            log_dir=log_dir,
+            run_dir=config["paths"]["run_dir"],
             checkpoint_dir=checkpoint_dir,
         )
 
-        # 恢复训练
+        # 恢复训练（复用前面已预加载的检查点数据）
         if args.resume:
             success = trainer.load_checkpoint(args.resume)
             if not success:
@@ -216,7 +212,7 @@ def main():
 
     # ===== 推理模式 =====
     if args.infer:
-        checkpoint_path = args.checkpoint or config["paths"]["checkpoint_dir"]
+        checkpoint_path = args.checkpoint or os.path.join(config["paths"]["checkpoint_dir"], "model_best.pt")
         if not os.path.exists(checkpoint_path):
             logger.error("未指定检查点路径，且默认路径不存在")
             logger.error("请使用 --checkpoint 参数指定检查点路径")
@@ -225,12 +221,13 @@ def main():
         logger.info(f"加载检查点: {checkpoint_path}")
 
         # 加载检查点获取配置
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         saved_config = checkpoint.get("config", config)
 
         # 创建模型
         model = create_model(saved_config)
-        model.load_state_dict(checkpoint["model_state_dict"])
+        state_dict = strip_compile_prefix(checkpoint["model_state_dict"])
+        model.load_state_dict(state_dict)
         model = model.to(device)
         model.eval()
 
@@ -258,7 +255,7 @@ def main():
             from src.datasets import load_texts_from_directory
             test_texts = load_texts_from_directory(data_dir)
             # 取每个文本的前 20 个字符作为 prompt
-            prompts = [text[:min(20, len(text))] for text in test_texts[:5]]
+            prompts = [text[:min(20, len(text))] for text in test_texts]
             logger.info(f"从 {data_dir} 加载了 {len(prompts)} 个测试 prompt")
         else:
             # 使用默认 prompt
@@ -266,7 +263,9 @@ def main():
             logger.info("使用默认 prompt")
 
         # 批量推理
-        output_path = args.output_path or config["paths"]["output_dir"]
+        output_path = args.output_path or os.path.join(
+            config["paths"]["output_dir"], "results.csv"
+        )
         results = batch_inference(
             model=model,
             tokenizer=tokenizer,
